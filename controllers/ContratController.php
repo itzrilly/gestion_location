@@ -14,9 +14,19 @@ class ContratController {
         if (session_status() == PHP_SESSION_NONE) {
             session_start();
         }
-
+        
         $stmt = $this->contrat->read();
-        $contrats = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $activeContrats = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $archivedContrats = $this->contrat->readAllArchivedFromXml();
+        
+        $allContrats = array_merge($activeContrats, $archivedContrats);
+
+        usort($allContrats, function($a, $b) {
+            return strtotime($b['dateCreation']) - strtotime($a['dateCreation']);
+        });
+
+        $contrats = $allContrats;
 
         require_once 'views/contrat/index.php';
     }
@@ -33,13 +43,15 @@ class ContratController {
             if (!$appartementExists || !$locataireExists) {
                 $_SESSION['flash'] = [
                     'type' => 'danger',
-                    'message' => (!$appartementExists ? 'L\'appartement sélectionné n\'existe pas.' : '') .
+                    'message' => 'Erreur de validation : ' .
+                                 (!$appartementExists ? 'L\'appartement sélectionné n\'existe pas.' : '') .
                                  (!$locataireExists ? ' Le locataire sélectionné n\'existe pas.' : '')
                 ];
                 header('Location: ?controller=contrat&action=create');
                 exit;
             }
 
+            $this->contrat->numContrat = null;
             $this->contrat->etat = $_POST['etat'] ?? '';
             $this->contrat->dateCreation = $_POST['dateCreation'] ?? date('Y-m-d');
             $this->contrat->dateDebut = $_POST['dateDebut'] ?? '';
@@ -52,7 +64,7 @@ class ContratController {
                     'type' => 'success',
                     'message' => 'Contrat créé avec succès.'
                 ];
-                header('Location: ?controller=contrat&action=create'); 
+                header('Location: ?controller=contrat&action=index');
                 exit;
             } else {
                 $_SESSION['flash'] = [
@@ -63,7 +75,7 @@ class ContratController {
                 exit;
             }
         }
-
+        
         $appartements = $this->getAppartements();
         $locataires = $this->getLocataires();
         
@@ -77,6 +89,16 @@ class ContratController {
 
         $numContrat = $_GET['id'] ?? $_POST['numContrat'] ?? null;
 
+        $contratInDb = $this->contrat->read_single();
+        if (!$contratInDb) {
+            $_SESSION['flash'] = [
+                'type' => 'danger',
+                'message' => 'Ce contrat est archivé et ne peut pas être modifié directement. Veuillez le rétablir d\'abord.'
+            ];
+            header('Location: ?controller=contrat&action=index');
+            exit;
+        }
+
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $appartementExists = $this->checkAppartementExists($_POST['numAppartement']);
             $locataireExists = $this->checkLocataireExists($_POST['numLocataire']);
@@ -84,7 +106,8 @@ class ContratController {
             if (!$appartementExists || !$locataireExists) {
                 $_SESSION['flash'] = [
                     'type' => 'danger',
-                    'message' => (!$appartementExists ? 'L\'appartement sélectionné n\'existe pas.' : '') .
+                    'message' => 'Erreur de validation : ' .
+                                 (!$appartementExists ? 'L\'appartement sélectionné n\'existe pas.' : '') .
                                  (!$locataireExists ? ' Le locataire sélectionné n\'existe pas.' : '')
                 ];
                 header('Location: ?controller=contrat&action=edit&id=' . $numContrat);
@@ -116,17 +139,7 @@ class ContratController {
             }
         } 
         else {
-            if ($numContrat) {
-                $this->contrat->numContrat = $numContrat;
-                if (!$this->contrat->read_single()) {
-                    $_SESSION['flash'] = [
-                        'type' => 'danger',
-                        'message' => 'Contrat non trouvé.'
-                    ];
-                    header('Location: ?controller=contrat&action=index');
-                    exit;
-                }
-            } else {
+            if (!$numContrat) {
                 $_SESSION['flash'] = [
                     'type' => 'danger',
                     'message' => 'Aucun contrat spécifié pour la modification.'
@@ -135,7 +148,7 @@ class ContratController {
                 exit;
             }
         }
-        
+
         $appartements = $this->getAppartements();
         $locataires = $this->getLocataires();
         
@@ -151,30 +164,32 @@ class ContratController {
 
         if ($numContrat) {
             $this->contrat->numContrat = $numContrat;
-            if ($this->contrat->read_single()) {
-                $this->contrat->etat = 'Résilier';
-                if ($this->contrat->update()) { 
-                   if ($this->contrat->exportToXml($numContrat)) {
-                        $_SESSION['flash'] = [
-                            'type' => 'success',
-                            'message' => 'Contrat résilié et archivé avec succès.'
-                        ];
-                    } else {
-                        $_SESSION['flash'] = [
-                            'type' => 'warning',
-                            'message' => 'Contrat résilié, mais erreur lors de l\'archivage XML.'
-                        ];
-                    }
+            
+            if (!$this->contrat->read_single()) {
+                $_SESSION['flash'] = [
+                    'type' => 'danger',
+                    'message' => 'Contrat à résilier non trouvé en base de données.'
+                ];
+                header('Location: ?controller=contrat&action=index');
+                exit;
+            }
+
+            if ($this->contrat->exportToXml($numContrat)) {
+                if ($this->contrat->delete()) {
+                    $_SESSION['flash'] = [
+                        'type' => 'success',
+                        'message' => 'Contrat résilié et archivé avec succès.'
+                    ];
                 } else {
                     $_SESSION['flash'] = [
                         'type' => 'danger',
-                        'message' => 'Erreur lors de la résiliation du contrat.'
+                        'message' => 'Contrat archivé, mais erreur lors de la suppression de la base de données.'
                     ];
                 }
             } else {
                 $_SESSION['flash'] = [
                     'type' => 'danger',
-                    'message' => 'Contrat à résilier non trouvé.'
+                    'message' => 'Erreur lors de l\'archivage du contrat en XML. Le contrat n\'a pas été supprimé de la base de données.'
                 ];
             }
         } else {
@@ -205,7 +220,7 @@ class ContratController {
                 $this->contrat->dateFin = $contractData['dateFin'];
                 $this->contrat->numAppartement = $contractData['numAppartement'];
                 $this->contrat->numLocataire = $contractData['numLocataire'];
-
+                
                 $appartementExists = $this->checkAppartementExists($this->contrat->numAppartement);
                 $locataireExists = $this->checkLocataireExists($this->contrat->numLocataire);
 
@@ -218,7 +233,7 @@ class ContratController {
                     exit;
                 }
 
-                if ($this->contrat->update()) {
+                if ($this->contrat->create()) {
                     if ($this->contrat->deleteXmlFile($numContrat)) {
                         $_SESSION['flash'] = [
                             'type' => 'success',
@@ -227,13 +242,13 @@ class ContratController {
                     } else {
                         $_SESSION['flash'] = [
                             'type' => 'warning',
-                            'message' => 'Contrat rétabli, mais erreur lors de la suppression du fichier XML.'
+                            'message' => 'Contrat rétabli, mais erreur lors de la suppression du fichier XML. Supprimez-le manuellement si nécessaire.'
                         ];
                     }
                 } else {
                     $_SESSION['flash'] = [
                         'type' => 'danger',
-                        'message' => 'Erreur lors du rétablissement du contrat en base de données.'
+                        'message' => 'Erreur lors du rétablissement du contrat en base de données. Le fichier XML est toujours présent.'
                     ];
                 }
             } else {
@@ -251,13 +266,12 @@ class ContratController {
         header('Location: ?controller=contrat&action=index');
         exit;
     }
-    
-     public function print() {
+
+    public function print() {
         if (session_status() == PHP_SESSION_NONE) {
             session_start();
         }
 
-        $stmt = $this->contrat->read();
         $contrats = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         require_once 'views/contrat/print.php';
